@@ -8,6 +8,7 @@ import aiohttp
 import base64
 import io
 import json
+import httpx
 
 from typing import AsyncGenerator, List, Literal
 
@@ -21,8 +22,6 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesFrame,
-    LLMResponseEndFrame,
-    LLMResponseStartFrame,
     TextFrame,
     URLImageRawFrame,
     VisionImageRawFrame
@@ -39,7 +38,7 @@ from pipecat.services.ai_services import (
 )
 
 try:
-    from openai import AsyncOpenAI, AsyncStream, BadRequestError
+    from openai import AsyncOpenAI, AsyncStream, DefaultAsyncHttpxClient, BadRequestError
     from openai.types.chat import (
         ChatCompletionChunk,
         ChatCompletionFunctionMessageParam,
@@ -73,7 +72,14 @@ class BaseOpenAILLMService(LLMService):
         self._client = self.create_client(api_key=api_key, base_url=base_url, **kwargs)
 
     def create_client(self, api_key=None, base_url=None, **kwargs):
-        return AsyncOpenAI(api_key=api_key, base_url=base_url)
+        return AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=DefaultAsyncHttpxClient(
+                limits=httpx.Limits(
+                    max_keepalive_connections=100,
+                    max_connections=1000,
+                    keepalive_expiry=None)))
 
     def can_generate_metrics(self) -> bool:
         return True
@@ -151,9 +157,7 @@ class BaseOpenAILLMService(LLMService):
                     # Keep iterating through the response to collect all the argument fragments
                     arguments += tool_call.function.arguments
             elif chunk.choices[0].delta.content:
-                await self.push_frame(LLMResponseStartFrame())
                 await self.push_frame(TextFrame(chunk.choices[0].delta.content))
-                await self.push_frame(LLMResponseEndFrame())
 
         # if we got a function name and arguments, check to see if it's a function with
         # a registered handler. If so, run the registered callback, save the result to

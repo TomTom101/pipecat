@@ -28,6 +28,24 @@ from pipecat.processors.async_frame_processor import AsyncFrameProcessor
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.utils.audio import calculate_audio_volume
 from pipecat.utils.utils import exp_smoothing
+import re
+
+
+ENDOFSENTENCE_PATTERN_STR = r"""
+    (?<![A-Z])       # Negative lookbehind: not preceded by an uppercase letter (e.g., "U.S.A.")
+    (?<!\d)          # Negative lookbehind: not preceded by a digit (e.g., "1. Let's start")
+    (?<!\d\s[ap])    # Negative lookbehind: not preceded by time (e.g., "3:00 a.m.")
+    (?<!Mr|Ms|Dr)    # Negative lookbehind: not preceded by Mr, Ms, Dr (combined bc. length is the same)
+    (?<!Mrs)         # Negative lookbehind: not preceded by "Mrs"
+    (?<!Prof)        # Negative lookbehind: not preceded by "Prof"
+    [\.\?\!:]        # Match a period, question mark, exclamation point, or colon
+    $                # End of string
+"""
+ENDOFSENTENCE_PATTERN = re.compile(ENDOFSENTENCE_PATTERN_STR, re.VERBOSE)
+
+
+def match_endofsentence(text: str) -> bool:
+    return ENDOFSENTENCE_PATTERN.search(text.rstrip()) is not None
 
 
 class AIService(FrameProcessor):
@@ -118,9 +136,16 @@ class LLMService(AIService):
 
 
 class TTSService(AIService):
-    def __init__(self, *, aggregate_sentences: bool = True, **kwargs):
+    def __init__(
+            self,
+            *,
+            aggregate_sentences: bool = True,
+            # if True, subclass is responsible for pushing TextFrames and LLMFullResponseEndFrames
+            push_text_frames: bool = True,
+            **kwargs):
         super().__init__(**kwargs)
         self._aggregate_sentences: bool = aggregate_sentences
+        self._push_text_frames: bool = push_text_frames
         self._current_sentence: str = ""
 
     # Converts the text to audio.
@@ -131,15 +156,17 @@ class TTSService(AIService):
     async def say(self, text: str):
         await self.process_frame(TextFrame(text=text), FrameDirection.DOWNSTREAM)
 
+    async def _handle_interruption(self, frame: StartInterruptionFrame, direction: FrameDirection):
+        self._current_sentence = ""
+        await self.push_frame(frame, direction)
+
     async def _process_text_frame(self, frame: TextFrame):
         text: str | None = None
         if not self._aggregate_sentences:
             text = frame.text
         else:
             self._current_sentence += frame.text
-            if self._current_sentence.strip().endswith(
-                    (".", "?", "!")) and not self._current_sentence.strip().endswith(
-                    ("Mr,", "Mrs.", "Ms.", "Dr.")):
+            if match_endofsentence(self._current_sentence):
                 text = self._current_sentence
                 self._current_sentence = ""
 
@@ -156,9 +183,10 @@ class TTSService(AIService):
         await self.process_generator(self.run_tts(text))
         await self.stop_processing_metrics()
         await self.push_frame(TTSStoppedFrame())
-        # We send the original text after the audio. This way, if we are
-        # interrupted, the text is not added to the assistant context.
-        await self.push_frame(TextFrame(text))
+        if self._push_text_frames:
+            # We send the original text after the audio. This way, if we are
+            # interrupted, the text is not added to the assistant context.
+            await self.push_frame(TextFrame(text))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -166,12 +194,15 @@ class TTSService(AIService):
         if isinstance(frame, TextFrame):
             await self._process_text_frame(frame)
         elif isinstance(frame, StartInterruptionFrame):
-            self._current_sentence = ""
-            await self.push_frame(frame, direction)
+            await self._handle_interruption(frame, direction)
         elif isinstance(frame, LLMFullResponseEndFrame) or isinstance(frame, EndFrame):
             self._current_sentence = ""
             await self._push_tts_frames(self._current_sentence)
-            await self.push_frame(frame)
+            if isinstance(frame, LLMFullResponseEndFrame):
+                if self._push_text_frames:
+                    await self.push_frame(frame, direction)
+            else:
+                await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
 

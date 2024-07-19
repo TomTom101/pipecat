@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "An open source framework for voice (and multimodal) assistants"
 license = { text = "BSD 2-Clause License" }
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 keywords = ["webrtc", "audio", "video", "ai"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -36,7 +36,7 @@ Website = "https://pipecat.ai"
 [project.optional-dependencies]
 anthropic = [ "anthropic~=0.28.1" ]
 azure = [ "azure-cognitiveservices-speech~=1.38.0" ]
-cartesia = [ "cartesia~=1.0.3" ]
+cartesia = [ "websockets~=12.0" ]
 daily = [ "daily-python~=0.10.1" ]
 deepgram = [ "deepgram-sdk~=3.2.7" ]
 examples = [ "python-dotenv~=1.0.0", "flask~=3.0.3", "flask_cors~=4.0.1" ]
