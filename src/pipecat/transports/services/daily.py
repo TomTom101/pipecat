@@ -198,14 +198,18 @@ class DailyTransportClient(EventHandler):
     def set_callbacks(self, callbacks: DailyCallbacks):
         self._callbacks = callbacks
 
-    async def send_message(self, frame: DailyTransportMessageFrame):
+    async def send_message(self, frame: TransportMessageFrame):
         if not self._client:
             return
+
+        participant_id = None
+        if isinstance(frame, DailyTransportMessageFrame):
+            participant_id = frame.participant_id
 
         future = self._loop.create_future()
         self._client.send_app_message(
             frame.message,
-            frame.participant_id,
+            participant_id,
             completion=completion_callback(future))
         await future
 
@@ -265,10 +269,7 @@ class DailyTransportClient(EventHandler):
                 logger.info(f"Joined {self._room_url}")
 
                 if self._token and self._params.transcription_enabled:
-                    logger.info(
-                        f"Enabling transcription with settings {self._params.transcription_settings}")
-                    self._client.start_transcription(
-                        self._params.transcription_settings.model_dump(exclude_none=True))
+                    await self._start_transcription()
 
                 await self._callbacks.on_joined(data["participants"]["local"])
             else:
@@ -279,6 +280,17 @@ class DailyTransportClient(EventHandler):
             error_msg = f"Time out joining {self._room_url}"
             logger.error(error_msg)
             await self._callbacks.on_error(error_msg)
+
+    async def _start_transcription(self):
+        future = self._loop.create_future()
+        logger.info(f"Enabling transcription with settings {self._params.transcription_settings}")
+        self._client.start_transcription(
+            settings=self._params.transcription_settings.model_dump(exclude_none=True),
+            completion=lambda error: future.set_result(error)
+        )
+        error = await future
+        if error:
+            logger.error(f"Unable to start transcription: {error}")
 
     async def _join(self):
         future = self._loop.create_future()
@@ -339,7 +351,7 @@ class DailyTransportClient(EventHandler):
         logger.info(f"Leaving {self._room_url}")
 
         if self._params.transcription_enabled:
-            self._client.stop_transcription()
+            await self._stop_transcription()
 
         try:
             error = await self._leave()
@@ -355,6 +367,13 @@ class DailyTransportClient(EventHandler):
             error_msg = f"Time out leaving {self._room_url}"
             logger.error(error_msg)
             await self._callbacks.on_error(error_msg)
+
+    async def _stop_transcription(self):
+        future = self._loop.create_future()
+        self._client.stop_transcription(completion=lambda error: future.set_result(error))
+        error = await future
+        if error:
+            logger.error(f"Unable to stop transcription: {error}")
 
     async def _leave(self):
         future = self._loop.create_future()
@@ -655,16 +674,19 @@ class DailyOutputTransport(BaseOutputTransport):
         await super().cleanup()
         await self._client.cleanup()
 
-    async def send_message(self, frame: DailyTransportMessageFrame):
+    async def send_message(self, frame: TransportMessageFrame):
         await self._client.send_message(frame)
 
     async def send_metrics(self, frame: MetricsFrame):
+        metrics = {}
+        if frame.ttfb:
+            metrics["ttfb"] = frame.ttfb
+        if frame.processing:
+            metrics["processing"] = frame.processing
+
         message = DailyTransportMessageFrame(message={
             "type": "pipecat-metrics",
-            "metrics": {
-                "ttfb": frame.ttfb or [],
-                "processing": frame.processing or [],
-            },
+            "metrics": metrics
         })
         await self._client.send_message(message)
 

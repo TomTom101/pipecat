@@ -64,7 +64,7 @@ class Pipeline(BasePipeline):
         services = []
         for p in self._processors:
             if isinstance(p, BasePipeline):
-                services += p.processors_with_metrics()
+                services.extend(p.processors_with_metrics())
             elif p.can_generate_metrics():
                 services.append(p)
         return services
@@ -91,5 +91,7 @@ class Pipeline(BasePipeline):
     def _link_processors(self):
         prev = self._processors[0]
         for curr in self._processors[1:]:
+            prev.set_parent(self)
             prev.link(curr)
             prev = curr
+        prev.set_parent(self)
