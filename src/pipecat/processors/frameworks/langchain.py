@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-from typing import Union
+from typing import Any, Dict, Union
 
 from pipecat.frames.frames import (
     Frame,
@@ -27,18 +27,16 @@ except ModuleNotFoundError as e:
 
 
 class LangchainProcessor(FrameProcessor):
-    def __init__(self, chain: Runnable, transcript_key: str = "input"):
+    def __init__(self, chain: Runnable, *, transcript_key: str = "input"):
         super().__init__()
         self._chain = chain
+        self._config = dict()
         self._transcript_key = transcript_key
-        self._participant_id: str | None = None
 
-    def set_participant_id(self, participant_id: str):
-        self._participant_id = participant_id
+    def set_configurable(self, configurable: Dict[str, Any]):
+        self._config.update(configurable)
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
         if isinstance(frame, LLMMessagesFrame):
             # Messages are accumulated by the `LLMUserResponseAggregator` in a list of messages.
             # The last one by the human is the one we want to send to the LLM.
@@ -61,16 +59,16 @@ class LangchainProcessor(FrameProcessor):
 
     async def _ainvoke(self, text: str):
         logger.debug(f"Invoking chain with {text}")
+
         await self.push_frame(LLMFullResponseStartFrame())
         try:
             async for token in self._chain.astream(
                 {self._transcript_key: text},
-                config={"configurable": {"session_id": self._participant_id}},
+                config={"configurable": self._config},
             ):
                 await self.push_frame(TextFrame(self.__get_token_value(token)))
         except GeneratorExit:
-            logger.warning(f"{self} generator was closed prematurely")
+            logger.warning("Generator was closed prematurely")
         except Exception as e:
-            logger.exception(f"{self} an unknown error occurred: {e}")
-        finally:
-            await self.push_frame(LLMFullResponseEndFrame())
+            logger.error(f"An unknown error occurred: {e}")
+        await self.push_frame(LLMFullResponseEndFrame())

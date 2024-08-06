@@ -15,17 +15,27 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_response import (
-    LLMAssistantResponseAggregator, LLMUserResponseAggregator)
+    LLMAssistantResponseAggregator,
+    LLMUserResponseAggregator
+)
 from pipecat.processors.frameworks.langchain import LangchainProcessor
 from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.vad.silero import SileroVADAnalyzer
 
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_openai import ChatOpenAI
+try:
+    from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langchain_community.chat_message_histories import ChatMessageHistory
+    from langchain_core.chat_history import BaseChatMessageHistory
+    from langchain_core.runnables.history import RunnableWithMessageHistory
+    from langchain_core.runnables.utils import ConfigurableFieldSpec
+    from langchain_openai import ChatOpenAI
+
+except ModuleNotFoundError as e:
+    logger.exception(
+        "In order to run this example you need to `pip install pipecat-ai[langchain] langchain-community langchain-openai. Also, be sure to set `OPENAI_API_KEY` in the environment variable."
+    )
+    raise Exception(f"Missing module: {e}")
 
 from loguru import logger
 
@@ -33,7 +43,6 @@ from runner import configure
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
-
 
 logger.remove(0)
 logger.add(sys.stderr, level="DEBUG")
@@ -105,7 +114,7 @@ async def main():
         @transport.event_handler("on_first_participant_joined")
         async def on_first_participant_joined(transport, participant):
             transport.capture_participant_transcription(participant["id"])
-            lc.set_participant_id(participant["id"])
+            lc.set_configurable({"session_id": participant["id"]})
             # Kick off the conversation.
             # the `LLMMessagesFrame` will be picked up by the LangchainProcessor using
             # only the content of the last message to inject it in the prompt defined
