@@ -49,7 +49,9 @@ class ImageSyncAggregator(FrameProcessor):
         self._waiting_image_bytes = self._waiting_image.tobytes()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        if not isinstance(frame, SystemFrame):
+        await super().process_frame(frame, direction)
+
+        if not isinstance(frame, SystemFrame) and direction == FrameDirection.DOWNSTREAM:
             await self.push_frame(ImageRawFrame(image=self._speaking_image_bytes, size=(1024, 1024), format=self._speaking_image_format))
             await self.push_frame(frame)
             await self.push_frame(ImageRawFrame(image=self._waiting_image_bytes, size=(1024, 1024), format=self._waiting_image_format))
@@ -57,19 +59,22 @@ class ImageSyncAggregator(FrameProcessor):
             await self.push_frame(frame)
 
 
-async def main(room_url: str, token):
+async def main():
     async with aiohttp.ClientSession() as session:
+        (room_url, token) = await configure(session)
+
         transport = DailyTransport(
             room_url,
             token,
             "Respond bot",
             DailyParams(
                 audio_out_enabled=True,
+                camera_out_enabled=True,
                 camera_out_width=1024,
                 camera_out_height=1024,
                 transcription_enabled=True,
                 vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer()
+                vad_analyzer=SileroVADAnalyzer(),
             )
         )
 
@@ -114,7 +119,7 @@ async def main(room_url: str, token):
         async def on_first_participant_joined(transport, participant):
             participant_name = participant["info"]["userName"] or ''
             transport.capture_participant_transcription(participant["id"])
-            await task.queue_frames([TextFrame(f"Hi, this is {participant_name}.")])
+            await task.queue_frames([TextFrame(f"Hi there {participant_name}!")])
 
         runner = PipelineRunner()
 
@@ -122,5 +127,4 @@ async def main(room_url: str, token):
 
 
 if __name__ == "__main__":
-    (url, token) = configure()
-    asyncio.run(main(url, token))
+    asyncio.run(main())

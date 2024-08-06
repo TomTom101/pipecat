@@ -15,7 +15,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_response import (
     LLMAssistantResponseAggregator, LLMUserResponseAggregator)
-from pipecat.services.deepgram import DeepgramTTSService
+from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
 from pipecat.services.openai import OpenAILLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 from pipecat.vad.silero import SileroVADAnalyzer
@@ -31,19 +31,23 @@ logger.remove(0)
 logger.add(sys.stderr, level="DEBUG")
 
 
-async def main(room_url: str, token):
+async def main():
     async with aiohttp.ClientSession() as session:
+        (room_url, token) = await configure(session)
+
         transport = DailyTransport(
             room_url,
             token,
             "Respond bot",
             DailyParams(
                 audio_out_enabled=True,
-                transcription_enabled=True,
                 vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer()
+                vad_analyzer=SileroVADAnalyzer(),
+                vad_audio_passthrough=True
             )
         )
+
+        stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 
         tts = DeepgramTTSService(
             aiohttp_session=session,
@@ -67,6 +71,7 @@ async def main(room_url: str, token):
 
         pipeline = Pipeline([
             transport.input(),   # Transport user input
+            stt,                 # STT
             tma_in,              # User responses
             llm,                 # LLM
             tts,                 # TTS
@@ -90,5 +95,4 @@ async def main(room_url: str, token):
 
 
 if __name__ == "__main__":
-    (url, token) = configure()
-    asyncio.run(main(url, token))
+    asyncio.run(main())

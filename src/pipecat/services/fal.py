@@ -39,8 +39,8 @@ class FalImageGenService(ImageGenService):
     def __init__(
         self,
         *,
-        aiohttp_session: aiohttp.ClientSession,
         params: InputParams,
+        aiohttp_session: aiohttp.ClientSession,
         model: str = "fal-ai/fast-sdxl",
         key: str | None = None,
     ):
@@ -56,13 +56,13 @@ class FalImageGenService(ImageGenService):
 
         response = await fal_client.run_async(
             self._model,
-            arguments={"prompt": prompt, **self._params.model_dump()}
+            arguments={"prompt": prompt, **self._params.model_dump(exclude_none=True)}
         )
 
         image_url = response["images"][0]["url"] if response else None
 
         if not image_url:
-            logger.error("Image generation failed")
+            logger.error(f"{self} error: image generation failed")
             yield ErrorFrame("Image generation failed")
             return
 

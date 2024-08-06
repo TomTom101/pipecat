@@ -1,5 +1,11 @@
-import asyncio
+#
+# Copyright (c) 2024, Daily
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
+
 import aiohttp
+import asyncio
 import os
 import sys
 
@@ -12,7 +18,11 @@ from pipecat.processors.aggregators.sentence import SentenceAggregator
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.azure import AzureTTSService
 from pipecat.services.openai import OpenAILLMService
-from pipecat.transports.services.daily import DailyParams, DailyTranscriptionSettings, DailyTransport, DailyTransportMessageFrame
+from pipecat.transports.services.daily import (
+    DailyParams,
+    DailyTranscriptionSettings,
+    DailyTransport,
+    DailyTransportMessageFrame)
 
 from runner import configure
 
@@ -40,6 +50,8 @@ class TranslationProcessor(FrameProcessor):
         self._language = language
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, TextFrame):
             context = [
                 {
@@ -65,6 +77,8 @@ class TranslationSubtitles(FrameProcessor):
     # subtitles.
     #
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, TextFrame):
             message = {
                 "language": self._language,
@@ -75,8 +89,10 @@ class TranslationSubtitles(FrameProcessor):
         await self.push_frame(frame)
 
 
-async def main(room_url: str, token):
+async def main():
     async with aiohttp.ClientSession() as session:
+        (room_url, token) = await configure(session)
+
         transport = DailyTransport(
             room_url,
             token,
@@ -129,5 +145,4 @@ async def main(room_url: str, token):
 
 
 if __name__ == "__main__":
-    (url, token) = configure()
-    asyncio.run(main(url, token))
+    asyncio.run(main())

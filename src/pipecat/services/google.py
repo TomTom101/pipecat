@@ -1,19 +1,20 @@
+#
+# Copyright (c) 2024, Daily
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
 
-import json
-import os
 import asyncio
-import time
 
 from typing import List
 
 from pipecat.frames.frames import (
     Frame,
+    LLMModelUpdateFrame,
     TextFrame,
     VisionImageRawFrame,
     LLMMessagesFrame,
     LLMFullResponseStartFrame,
-    LLMResponseStartFrame,
-    LLMResponseEndFrame,
     LLMFullResponseEndFrame
 )
 from pipecat.processors.frame_processor import FrameDirection
@@ -40,9 +41,15 @@ class GoogleLLMService(LLMService):
     franca for all LLM services, so that it is easy to switch between different LLMs.
     """
 
-    def __init__(self, api_key: str, model: str = "gemini-1.5-flash-latest", **kwargs):
+    def __init__(self, *, api_key: str, model: str = "gemini-1.5-flash-latest", **kwargs):
         super().__init__(**kwargs)
         gai.configure(api_key=api_key)
+        self._create_client(model)
+
+    def can_generate_metrics(self) -> bool:
+        return True
+
+    def _create_client(self, model: str):
         self._client = gai.GenerativeModel(model)
 
     def _get_messages_from_openai_context(
@@ -81,30 +88,32 @@ class GoogleLLMService(LLMService):
 
             messages = self._get_messages_from_openai_context(context)
 
-            start_time = time.time()
+            await self.start_ttfb_metrics()
+
             response = self._client.generate_content(messages, stream=True)
-            logger.debug(f"Google LLM TTFB: {time.time() - start_time}")
+
+            await self.stop_ttfb_metrics()
 
             async for chunk in self._async_generator_wrapper(response):
                 try:
                     text = chunk.text
-                    await self.push_frame(LLMResponseStartFrame())
                     await self.push_frame(TextFrame(text))
-                    await self.push_frame(LLMResponseEndFrame())
                 except Exception as e:
                     # Google LLMs seem to flag safety issues a lot!
                     if chunk.candidates[0].finish_reason == 3:
                         logger.debug(
                             f"LLM refused to generate content for safety reasons - {messages}.")
                     else:
-                        logger.error(f"Error {e}")
+                        logger.exception(f"{self} error: {e}")
 
         except Exception as e:
-            logger.error(f"Exception: {e}")
+            logger.exception(f"{self} exception: {e}")
         finally:
             await self.push_frame(LLMFullResponseEndFrame())
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         context = None
 
         if isinstance(frame, OpenAILLMContextFrame):
@@ -113,6 +122,9 @@ class GoogleLLMService(LLMService):
             context = OpenAILLMContext.from_messages(frame.messages)
         elif isinstance(frame, VisionImageRawFrame):
             context = OpenAILLMContext.from_image_frame(frame)
+        elif isinstance(frame, LLMModelUpdateFrame):
+            logger.debug(f"Switching LLM model to: [{frame.model}]")
+            self._create_client(frame.model)
         else:
             await self.push_frame(frame, direction)
 

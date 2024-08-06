@@ -6,8 +6,10 @@
 
 import asyncio
 
+from itertools import chain
 from typing import List
 
+from pipecat.pipeline.base_pipeline import BasePipeline
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.frames.frames import Frame
@@ -22,6 +24,8 @@ class Source(FrameProcessor):
         self._up_queue = upstream_queue
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         match direction:
             case FrameDirection.UPSTREAM:
                 await self._up_queue.put(frame)
@@ -36,6 +40,8 @@ class Sink(FrameProcessor):
         self._down_queue = downstream_queue
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         match direction:
             case FrameDirection.UPSTREAM:
                 await self.push_frame(frame, direction)
@@ -43,7 +49,7 @@ class Sink(FrameProcessor):
                 await self._down_queue.put(frame)
 
 
-class ParallelTask(FrameProcessor):
+class ParallelTask(BasePipeline):
     def __init__(self, *args):
         super().__init__()
 
@@ -76,10 +82,19 @@ class ParallelTask(FrameProcessor):
         logger.debug(f"Finished creating {self} pipelines")
 
     #
+    # BasePipeline
+    #
+
+    def processors_with_metrics(self) -> List[FrameProcessor]:
+        return list(chain.from_iterable(p.processors_with_metrics() for p in self._pipelines))
+
+    #
     # Frame processor
     #
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if direction == FrameDirection.UPSTREAM:
             # If we get an upstream frame we process it in each sink.
             await asyncio.gather(*[s.process_frame(frame, direction) for s in self._sinks])

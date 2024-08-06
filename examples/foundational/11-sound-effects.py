@@ -60,6 +60,8 @@ for file in sound_files:
 class OutboundSoundEffectWrapper(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, LLMFullResponseEndFrame):
             await self.push_frame(sounds["ding1.wav"])
             # In case anything else downstream needs it
@@ -71,6 +73,8 @@ class OutboundSoundEffectWrapper(FrameProcessor):
 class InboundSoundEffectWrapper(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, LLMMessagesFrame):
             await self.push_frame(sounds["ding2.wav"])
             # In case anything else downstream needs it
@@ -79,8 +83,10 @@ class InboundSoundEffectWrapper(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
-async def main(room_url: str, token):
+async def main():
     async with aiohttp.ClientSession() as session:
+        (room_url, token) = await configure(session)
+
         transport = DailyTransport(
             room_url,
             token,
@@ -144,5 +150,4 @@ async def main(room_url: str, token):
 
 
 if __name__ == "__main__":
-    (url, token) = configure()
-    asyncio.run(main(url, token))
+    asyncio.run(main())

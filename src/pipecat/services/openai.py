@@ -4,39 +4,43 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-import io
-import json
-import time
 import aiohttp
 import base64
-
-from PIL import Image
+import io
+import json
+import httpx
 
 from typing import AsyncGenerator, List, Literal
 
+from loguru import logger
+from PIL import Image
+
 from pipecat.frames.frames import (
+    AudioRawFrame,
     ErrorFrame,
     Frame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesFrame,
-    LLMResponseEndFrame,
-    LLMResponseStartFrame,
+    LLMModelUpdateFrame,
     TextFrame,
     URLImageRawFrame,
     VisionImageRawFrame
 )
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext, OpenAILLMContextFrame
+from pipecat.processors.aggregators.openai_llm_context import (
+    OpenAILLMContext,
+    OpenAILLMContextFrame
+)
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.ai_services import LLMService, ImageGenService
-
-from loguru import logger
+from pipecat.services.ai_services import (
+    ImageGenService,
+    LLMService,
+    TTSService
+)
 
 try:
-    from openai import AsyncOpenAI, AsyncStream
-
+    from openai import AsyncOpenAI, AsyncStream, DefaultAsyncHttpxClient, BadRequestError
     from openai.types.chat import (
-        ChatCompletion,
         ChatCompletionChunk,
         ChatCompletionFunctionMessageParam,
         ChatCompletionMessageParam,
@@ -49,7 +53,7 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
-class OpenAIUnhandledFunctionException(BaseException):
+class OpenAIUnhandledFunctionException(Exception):
     pass
 
 
@@ -63,17 +67,39 @@ class BaseOpenAILLMService(LLMService):
     calls from the LLM.
     """
 
-    def __init__(self, model: str, api_key=None, base_url=None):
-        super().__init__()
+    def __init__(self, *, model: str, api_key=None, base_url=None, **kwargs):
+        super().__init__(**kwargs)
         self._model: str = model
-        self._client = self.create_client(api_key=api_key, base_url=base_url)
+        self._client = self.create_client(api_key=api_key, base_url=base_url, **kwargs)
 
-    def create_client(self, api_key=None, base_url=None):
-        return AsyncOpenAI(api_key=api_key, base_url=base_url)
+    def create_client(self, api_key=None, base_url=None, **kwargs):
+        return AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=DefaultAsyncHttpxClient(
+                limits=httpx.Limits(
+                    max_keepalive_connections=100,
+                    max_connections=1000,
+                    keepalive_expiry=None)))
+
+    def can_generate_metrics(self) -> bool:
+        return True
+
+    async def get_chat_completions(
+            self,
+            context: OpenAILLMContext,
+            messages: List[ChatCompletionMessageParam]) -> AsyncStream[ChatCompletionChunk]:
+        chunks = await self._client.chat.completions.create(
+            model=self._model,
+            stream=True,
+            messages=messages,
+            tools=context.tools,
+            tool_choice=context.tool_choice,
+        )
+        return chunks
 
     async def _stream_chat_completions(
-        self, context: OpenAILLMContext
-    ) -> AsyncStream[ChatCompletionChunk]:
+            self, context: OpenAILLMContext) -> AsyncStream[ChatCompletionChunk]:
         logger.debug(f"Generating chat: {context.get_messages_json()}")
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
@@ -90,34 +116,16 @@ class BaseOpenAILLMService(LLMService):
                 del message["data"]
                 del message["mime_type"]
 
-        start_time = time.time()
-        chunks: AsyncStream[ChatCompletionChunk] = (
-            await self._client.chat.completions.create(
-                model=self._model,
-                stream=True,
-                messages=messages,
-                tools=context.tools,
-                tool_choice=context.tool_choice,
-            )
-        )
-
-        logger.debug(f"OpenAI LLM TTFB: {time.time() - start_time}")
+        chunks = await self.get_chat_completions(context, messages)
 
         return chunks
-
-    async def _chat_completions(self, messages) -> str | None:
-        response: ChatCompletion = await self._client.chat.completions.create(
-            model=self._model, stream=False, messages=messages
-        )
-        if response and len(response.choices) > 0:
-            return response.choices[0].message.content
-        else:
-            return None
 
     async def _process_context(self, context: OpenAILLMContext):
         function_name = ""
         arguments = ""
         tool_call_id = ""
+
+        await self.start_ttfb_metrics()
 
         chunk_stream: AsyncStream[ChatCompletionChunk] = (
             await self._stream_chat_completions(context)
@@ -126,6 +134,8 @@ class BaseOpenAILLMService(LLMService):
         async for chunk in chunk_stream:
             if len(chunk.choices) == 0:
                 continue
+
+            await self.stop_ttfb_metrics()
 
             if chunk.choices[0].delta.tool_calls:
                 # We're streaming the LLM response to enable the fastest response times.
@@ -148,9 +158,7 @@ class BaseOpenAILLMService(LLMService):
                     # Keep iterating through the response to collect all the argument fragments
                     arguments += tool_call.function.arguments
             elif chunk.choices[0].delta.content:
-                await self.push_frame(LLMResponseStartFrame())
                 await self.push_frame(TextFrame(chunk.choices[0].delta.content))
-                await self.push_frame(LLMResponseEndFrame())
 
         # if we got a function name and arguments, check to see if it's a function with
         # a registered handler. If so, run the registered callback, save the result to
@@ -208,9 +216,11 @@ class BaseOpenAILLMService(LLMService):
         elif isinstance(result, type(None)):
             pass
         else:
-            raise BaseException(f"Unknown return type from function callback: {type(result)}")
+            raise TypeError(f"Unknown return type from function callback: {type(result)}")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         context = None
         if isinstance(frame, OpenAILLMContextFrame):
             context: OpenAILLMContext = frame.context
@@ -218,19 +228,24 @@ class BaseOpenAILLMService(LLMService):
             context = OpenAILLMContext.from_messages(frame.messages)
         elif isinstance(frame, VisionImageRawFrame):
             context = OpenAILLMContext.from_image_frame(frame)
+        elif isinstance(frame, LLMModelUpdateFrame):
+            logger.debug(f"Switching LLM model to: [{frame.model}]")
+            self._model = frame.model
         else:
             await self.push_frame(frame, direction)
 
         if context:
             await self.push_frame(LLMFullResponseStartFrame())
+            await self.start_processing_metrics()
             await self._process_context(context)
+            await self.stop_processing_metrics()
             await self.push_frame(LLMFullResponseEndFrame())
 
 
 class OpenAILLMService(BaseOpenAILLMService):
 
-    def __init__(self, model="gpt-4o", **kwargs):
-        super().__init__(model, **kwargs)
+    def __init__(self, *, model: str = "gpt-4o", **kwargs):
+        super().__init__(model=model, **kwargs)
 
 
 class OpenAIImageGenService(ImageGenService):
@@ -238,9 +253,9 @@ class OpenAIImageGenService(ImageGenService):
     def __init__(
         self,
         *,
-        image_size: Literal["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"],
-        aiohttp_session: aiohttp.ClientSession,
         api_key: str,
+        aiohttp_session: aiohttp.ClientSession,
+        image_size: Literal["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"],
         model: str = "dall-e-3",
     ):
         super().__init__()
@@ -262,7 +277,7 @@ class OpenAIImageGenService(ImageGenService):
         image_url = image.data[0].url
 
         if not image_url:
-            logger.error(f"No image provided in response: {image}")
+            logger.error(f"{self} No image provided in response: {image}")
             yield ErrorFrame("Image generation failed")
             return
 
@@ -272,3 +287,62 @@ class OpenAIImageGenService(ImageGenService):
             image = Image.open(image_stream)
             frame = URLImageRawFrame(image_url, image.tobytes(), image.size, image.format)
             yield frame
+
+
+class OpenAITTSService(TTSService):
+    """This service uses the OpenAI TTS API to generate audio from text.
+    The returned audio is PCM encoded at 24kHz. When using the DailyTransport, set the sample rate in the DailyParams accordingly:
+    ```
+    DailyParams(
+        audio_out_enabled=True,
+        audio_out_sample_rate=24_000,
+    )
+    ```
+    """
+
+    def __init__(
+            self,
+            *,
+            api_key: str | None = None,
+            voice: Literal["alloy", "echo", "fable", "onyx", "nova", "shimmer"] = "alloy",
+            model: Literal["tts-1", "tts-1-hd"] = "tts-1",
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self._voice = voice
+        self._model = model
+
+        self._client = AsyncOpenAI(api_key=api_key)
+
+    def can_generate_metrics(self) -> bool:
+        return True
+
+    async def set_voice(self, voice: str):
+        logger.debug(f"Switching TTS voice to: [{voice}]")
+        self._voice = voice
+
+    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+        logger.debug(f"Generating TTS: [{text}]")
+
+        try:
+            await self.start_ttfb_metrics()
+
+            async with self._client.audio.speech.with_streaming_response.create(
+                    input=text,
+                    model=self._model,
+                    voice=self._voice,
+                    response_format="pcm",
+            ) as r:
+                if r.status_code != 200:
+                    error = await r.text()
+                    logger.error(
+                        f"{self} error getting audio (status: {r.status_code}, error: {error})")
+                    yield ErrorFrame(f"Error getting audio (status: {r.status_code}, error: {error})")
+                    return
+                async for chunk in r.iter_bytes(8192):
+                    if len(chunk) > 0:
+                        await self.stop_ttfb_metrics()
+                        frame = AudioRawFrame(chunk, 24_000, 1)
+                        yield frame
+        except BadRequestError as e:
+            logger.exception(f"{self} error generating TTS: {e}")

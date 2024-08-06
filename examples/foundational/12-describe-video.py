@@ -42,13 +42,17 @@ class UserImageRequester(FrameProcessor):
         self._participant_id = participant_id
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if self._participant_id and isinstance(frame, TextFrame):
             await self.push_frame(UserImageRequestFrame(self._participant_id), FrameDirection.UPSTREAM)
         await self.push_frame(frame, direction)
 
 
-async def main(room_url: str, token):
+async def main():
     async with aiohttp.ClientSession() as session:
+        (room_url, token) = await configure(session)
+
         transport = DailyTransport(
             room_url,
             token,
@@ -106,5 +110,4 @@ async def main(room_url: str, token):
         await runner.run(task)
 
 if __name__ == "__main__":
-    (url, token) = configure()
-    asyncio.run(main(url, token))
+    asyncio.run(main())

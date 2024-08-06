@@ -23,11 +23,11 @@ from pipecat.frames.frames import (
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineTask
+from pipecat.pipeline.parallel_task import ParallelTask
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.gated import GatedAggregator
 from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 from pipecat.processors.aggregators.sentence import SentenceAggregator
-from pipecat.processors.aggregators.parallel_task import ParallelTask
 from pipecat.services.openai import OpenAILLMService
 from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.services.fal import FalImageGenService
@@ -59,6 +59,8 @@ class MonthPrepender(FrameProcessor):
         self.prepend_to_next_text_frame = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, MonthFrame):
             self.most_recent_month = frame.month
         elif self.prepend_to_next_text_frame and isinstance(frame, TextFrame):
@@ -71,8 +73,10 @@ class MonthPrepender(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
-async def main(room_url):
+async def main():
     async with aiohttp.ClientSession() as session:
+        (room_url, _) = await configure(session)
+
         transport = DailyTransport(
             room_url,
             None,
@@ -160,5 +164,4 @@ async def main(room_url):
 
 
 if __name__ == "__main__":
-    (url, token) = configure()
-    asyncio.run(main(url))
+    asyncio.run(main())

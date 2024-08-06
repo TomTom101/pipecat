@@ -6,6 +6,8 @@
 
 import asyncio
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import tkinter as tk
 
@@ -38,43 +40,45 @@ class TkInputTransport(BaseInputTransport):
     def __init__(self, py_audio: pyaudio.PyAudio, params: TransportParams):
         super().__init__(params)
 
+        sample_rate = self._params.audio_in_sample_rate
+        num_frames = int(sample_rate / 100) * 2  # 20ms of audio
+
         self._in_stream = py_audio.open(
             format=py_audio.get_format_from_width(2),
             channels=params.audio_in_channels,
             rate=params.audio_in_sample_rate,
-            frames_per_buffer=params.audio_in_sample_rate,
+            frames_per_buffer=num_frames,
+            stream_callback=self._audio_in_callback,
             input=True)
-
-    def read_next_audio_frame(self) -> AudioRawFrame | None:
-        sample_rate = self._params.audio_in_sample_rate
-        num_channels = self._params.audio_in_channels
-        num_frames = int(sample_rate / 100)  # 10ms of audio
-
-        audio = self._in_stream.read(num_frames, exception_on_overflow=False)
-
-        return AudioRawFrame(audio=audio, sample_rate=sample_rate, num_channels=num_channels)
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
         self._in_stream.start_stream()
 
-    async def stop(self):
-        await super().stop()
-        self._in_stream.stop_stream()
-
     async def cleanup(self):
+        await super().cleanup()
+        self._in_stream.stop_stream()
         # This is not very pretty (taken from PyAudio docs).
         while self._in_stream.is_active():
             await asyncio.sleep(0.1)
         self._in_stream.close()
 
-        await super().cleanup()
+    def _audio_in_callback(self, in_data, frame_count, time_info, status):
+        frame = AudioRawFrame(audio=in_data,
+                              sample_rate=self._params.audio_in_sample_rate,
+                              num_channels=self._params.audio_in_channels)
+
+        asyncio.run_coroutine_threadsafe(self.push_audio_frame(frame), self.get_event_loop())
+
+        return (None, pyaudio.paContinue)
 
 
 class TkOutputTransport(BaseOutputTransport):
 
     def __init__(self, tk_root: tk.Tk, py_audio: pyaudio.PyAudio, params: TransportParams):
         super().__init__(params)
+
+        self._executor = ThreadPoolExecutor(max_workers=5)
 
         self._out_stream = py_audio.open(
             format=py_audio.get_format_from_width(2),
@@ -89,27 +93,23 @@ class TkOutputTransport(BaseOutputTransport):
         self._image_label = tk.Label(tk_root, image=photo)
         self._image_label.pack()
 
-    def write_raw_audio_frames(self, frames: bytes):
-        self._out_stream.write(frames)
-
-    def write_frame_to_camera(self, frame: ImageRawFrame):
-        self.get_event_loop().call_soon(self._write_frame_to_tk, frame)
-
     async def start(self, frame: StartFrame):
         await super().start(frame)
         self._out_stream.start_stream()
 
-    async def stop(self):
-        await super().stop()
-        self._out_stream.stop_stream()
-
     async def cleanup(self):
+        await super().cleanup()
+        self._out_stream.stop_stream()
         # This is not very pretty (taken from PyAudio docs).
         while self._out_stream.is_active():
             await asyncio.sleep(0.1)
         self._out_stream.close()
 
-        await super().cleanup()
+    async def write_raw_audio_frames(self, frames: bytes):
+        await self.get_event_loop().run_in_executor(self._executor, self._out_stream.write, frames)
+
+    async def write_frame_to_camera(self, frame: ImageRawFrame):
+        self.get_event_loop().call_soon(self._write_frame_to_tk, frame)
 
     def _write_frame_to_tk(self, frame: ImageRawFrame):
         width = frame.size[0]

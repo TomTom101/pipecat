@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-from typing import Any, List, Tuple
+from typing import Any, List, Mapping, Tuple
 
 from dataclasses import dataclass, field
 
@@ -101,7 +101,7 @@ class UserImageRawFrame(ImageRawFrame):
 class SpriteFrame(Frame):
     """An animated sprite. Will be shown by the transport if the transport's
     camera is enabled. Will play at the framerate specified in the transport's
-    `fps` constructor parameter.
+    `camera_out_framerate` constructor parameter.
 
     """
     images: List[ImageRawFrame]
@@ -159,6 +159,34 @@ class LLMMessagesFrame(DataFrame):
 
 
 @dataclass
+class LLMMessagesAppendFrame(DataFrame):
+    """A frame containing a list of LLM messages that neeed to be added to the
+    current context.
+
+    """
+    messages: List[dict]
+
+
+@dataclass
+class LLMMessagesUpdateFrame(DataFrame):
+    """A frame containing a list of new LLM messages. These messages will
+    replace the current context LLM messages and should generate a new
+    LLMMessagesFrame.
+
+    """
+    messages: List[dict]
+
+
+@dataclass
+class TTSSpeakFrame(DataFrame):
+    """A frame that contains a text that should be spoken by the TTS in the
+    pipeline (if any).
+
+    """
+    text: str
+
+
+@dataclass
 class TransportMessageFrame(DataFrame):
     message: Any
 
@@ -182,12 +210,6 @@ class AppFrame(Frame):
 @dataclass
 class SystemFrame(Frame):
     pass
-
-
-@dataclass
-class StartFrame(SystemFrame):
-    """This is the first frame that should be pushed down a pipeline."""
-    allow_interruptions: bool = False
 
 
 @dataclass
@@ -238,6 +260,23 @@ class StopInterruptionFrame(SystemFrame):
     pass
 
 
+@dataclass
+class BotInterruptionFrame(SystemFrame):
+    """Emitted by when the bot should be interrupted. This will mainly cause the
+    same actions as if the user interrupted except that the
+    UserStartedSpeakingFrame and UserStoppedSpeakingFrame won't be generated.
+
+    """
+    pass
+
+
+@dataclass
+class MetricsFrame(SystemFrame):
+    """Emitted by processor that can compute metrics like latencies.
+    """
+    ttfb: List[Mapping[str, Any]] | None = None
+    processing: List[Mapping[str, Any]] | None = None
+
 #
 # Control frames
 #
@@ -246,6 +285,14 @@ class StopInterruptionFrame(SystemFrame):
 @dataclass
 class ControlFrame(Frame):
     pass
+
+
+@dataclass
+class StartFrame(ControlFrame):
+    """This is the first frame that should be pushed down a pipeline."""
+    allow_interruptions: bool = False
+    enable_metrics: bool = False
+    report_only_initial_ttfb: bool = False
 
 
 @dataclass
@@ -262,27 +309,13 @@ class EndFrame(ControlFrame):
 
 @dataclass
 class LLMFullResponseStartFrame(ControlFrame):
-    """Used to indicate the beginning of a full LLM response. Following
-    LLMResponseStartFrame, TextFrame and LLMResponseEndFrame for each sentence
-    until a LLMFullResponseEndFrame."""
+    """Used to indicate the beginning of an LLM response. Following by one or
+    more TextFrame and a final LLMFullResponseEndFrame."""
     pass
 
 
 @dataclass
 class LLMFullResponseEndFrame(ControlFrame):
-    """Indicates the end of a full LLM response."""
-    pass
-
-
-@dataclass
-class LLMResponseStartFrame(ControlFrame):
-    """Used to indicate the beginning of an LLM response. Following TextFrames
-    are part of the LLM response until an LLMResponseEndFrame"""
-    pass
-
-
-@dataclass
-class LLMResponseEndFrame(ControlFrame):
     """Indicates the end of an LLM response."""
     pass
 
@@ -301,6 +334,33 @@ class UserStartedSpeakingFrame(ControlFrame):
 @dataclass
 class UserStoppedSpeakingFrame(ControlFrame):
     """Emitted by the VAD to indicate that a user stopped speaking."""
+    pass
+
+
+@dataclass
+class BotStartedSpeakingFrame(ControlFrame):
+    """Emitted upstream by transport outputs to indicate the bot started speaking.
+
+    """
+    pass
+
+
+@dataclass
+class BotStoppedSpeakingFrame(ControlFrame):
+    """Emitted upstream by transport outputs to indicate the bot stopped speaking.
+
+    """
+    pass
+
+
+@dataclass
+class BotSpeakingFrame(ControlFrame):
+    """Emitted upstream by transport outputs while the bot is still
+    speaking. This can be used, for example, to detect when a user is idle. That
+    is, while the bot is speaking we don't want to trigger any user idle timeout
+    since the user might be listening.
+
+    """
     pass
 
 
@@ -329,3 +389,17 @@ class UserImageRequestFrame(ControlFrame):
 
     def __str__(self):
         return f"{self.name}, user: {self.user_id}"
+
+
+@dataclass
+class LLMModelUpdateFrame(ControlFrame):
+    """A control frame containing a request to update to a new LLM model.
+    """
+    model: str
+
+
+@dataclass
+class TTSVoiceUpdateFrame(ControlFrame):
+    """A control frame containing a request to update to a new TTS voice.
+    """
+    voice: str

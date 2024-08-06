@@ -29,6 +29,7 @@ class TransportParams(BaseModel):
     camera_out_framerate: int = 30
     camera_out_color_format: str = "RGB"
     audio_out_enabled: bool = False
+    audio_out_is_live: bool = False
     audio_out_sample_rate: int = 16000
     audio_out_channels: int = 1
     audio_in_enabled: bool = False
@@ -41,7 +42,12 @@ class TransportParams(BaseModel):
 
 class BaseTransport(ABC):
 
-    def __init__(self, loop: asyncio.AbstractEventLoop | None):
+    def __init__(self,
+                 input_name: str | None = None,
+                 output_name: str | None = None,
+                 loop: asyncio.AbstractEventLoop | None = None):
+        self._input_name = input_name
+        self._output_name = output_name
         self._loop = loop or asyncio.get_running_loop()
         self._event_handlers: dict = {}
 
@@ -55,19 +61,19 @@ class BaseTransport(ABC):
 
     def event_handler(self, event_name: str):
         def decorator(handler):
-            self._add_event_handler(event_name, handler)
+            self.add_event_handler(event_name, handler)
             return handler
         return decorator
+
+    def add_event_handler(self, event_name: str, handler):
+        if event_name not in self._event_handlers:
+            raise Exception(f"Event handler {event_name} not registered")
+        self._event_handlers[event_name].append(handler)
 
     def _register_event_handler(self, event_name: str):
         if event_name in self._event_handlers:
             raise Exception(f"Event handler {event_name} already registered")
         self._event_handlers[event_name] = []
-
-    def _add_event_handler(self, event_name: str, handler):
-        if event_name not in self._event_handlers:
-            raise Exception(f"Event handler {event_name} not registered")
-        self._event_handlers[event_name].append(handler)
 
     async def _call_event_handler(self, event_name: str, *args, **kwargs):
         try:
@@ -77,5 +83,4 @@ class BaseTransport(ABC):
                 else:
                     handler(self, *args, **kwargs)
         except Exception as e:
-            logger.error(f"Exception in event handler {event_name}: {e}")
-            raise e
+            logger.exception(f"Exception in event handler {event_name}: {e}")

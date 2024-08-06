@@ -6,6 +6,10 @@
 
 import asyncio
 
+from itertools import chain
+from typing import List
+
+from pipecat.pipeline.base_pipeline import BasePipeline
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.frames.frames import CancelFrame, EndFrame, Frame, StartFrame
@@ -20,6 +24,8 @@ class Source(FrameProcessor):
         self._up_queue = upstream_queue
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         match direction:
             case FrameDirection.UPSTREAM:
                 await self._up_queue.put(frame)
@@ -34,6 +40,8 @@ class Sink(FrameProcessor):
         self._down_queue = downstream_queue
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         match direction:
             case FrameDirection.UPSTREAM:
                 await self.push_frame(frame, direction)
@@ -41,7 +49,7 @@ class Sink(FrameProcessor):
                 await self._down_queue.put(frame)
 
 
-class ParallelPipeline(FrameProcessor):
+class ParallelPipeline(BasePipeline):
     def __init__(self, *args):
         super().__init__()
 
@@ -78,6 +86,13 @@ class ParallelPipeline(FrameProcessor):
         logger.debug(f"Finished creating {self} pipelines")
 
     #
+    # BasePipeline
+    #
+
+    def processors_with_metrics(self) -> List[FrameProcessor]:
+        return list(chain.from_iterable(p.processors_with_metrics() for p in self._pipelines))
+
+    #
     # Frame processor
     #
 
@@ -90,6 +105,8 @@ class ParallelPipeline(FrameProcessor):
         self._down_task = loop.create_task(self._process_down_queue())
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, StartFrame):
             await self._start_tasks()
 

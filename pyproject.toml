@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "An open source framework for voice (and multimodal) assistants"
 license = { text = "BSD 2-Clause License" }
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 keywords = ["webrtc", "audio", "video", "ai"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -26,7 +26,7 @@ dependencies = [
     "Pillow~=10.3.0",
     "protobuf~=4.25.3",
     "pyloudnorm~=0.1.1",
-    "typing-extensions~=4.11.0",
+    "typing-extensions~=4.12.1",
 ]
 
 [project.urls]
@@ -34,22 +34,26 @@ Source = "https://github.com/pipecat-ai/pipecat"
 Website = "https://pipecat.ai"
 
 [project.optional-dependencies]
-anthropic = [ "anthropic~=0.25.7" ]
-azure = [ "azure-cognitiveservices-speech~=1.37.0" ]
-cartesia = [ "numpy~=1.26.0", "sounddevice", "cartesia" ]
-daily = [ "daily-python~=0.9.0" ]
+anthropic = [ "anthropic~=0.28.1" ]
+azure = [ "azure-cognitiveservices-speech~=1.38.0" ]
+cartesia = [ "websockets~=12.0" ]
+daily = [ "daily-python~=0.10.1" ]
+deepgram = [ "deepgram-sdk~=3.2.7" ]
 examples = [ "python-dotenv~=1.0.0", "flask~=3.0.3", "flask_cors~=4.0.1" ]
-fal = [ "fal-client~=0.4.0" ]
-google = [ "google-generativeai~=0.5.3" ]
-fireworks = [ "openai~=1.26.0" ]
-langchain = [ "langchain~=0.2.1" ]
+fal = [ "fal-client~=0.4.1" ]
+gladia = [ "websockets~=12.0" ]
+google = [ "google-generativeai~=0.7.1" ]
+fireworks = [ "openai~=1.35.0" ]
+langchain = [ "langchain~=0.2.10", "langchain-community~=0.2.9", "langchain-openai~=0.1.17" ]
 local = [ "pyaudio~=0.2.0" ]
 moondream = [ "einops~=0.8.0", "timm~=0.9.16", "transformers~=4.40.2" ]
-openai = [ "openai~=1.26.0" ]
+openai = [ "openai~=1.35.0" ]
+openpipe = [ "openpipe~=4.18.0" ]
 playht = [ "pyht~=0.0.28" ]
-silero = [ "torch~=2.3.0", "torchaudio~=2.3.0" ]
-websocket = [ "websockets~=12.0" ]
-whisper = [ "faster-whisper~=1.0.2" ]
+silero = [ "torch~=2.3.1", "torchaudio~=2.3.1" ]
+websocket = [ "websockets~=12.0", "fastapi~=0.111.0" ]
+whisper = [ "faster-whisper~=1.0.3" ]
+xtts = [ "resampy~=0.4.3" ]
 
 [tool.setuptools.packages.find]
 # All the following settings are optional:

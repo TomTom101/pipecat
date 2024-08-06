@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import time
+
 import numpy as np
 
 from pipecat.frames.frames import AudioRawFrame, Frame, UserStartedSpeakingFrame, UserStoppedSpeakingFrame
@@ -25,17 +27,35 @@ except ModuleNotFoundError as e:
     logger.error("In order to use Silero VAD, you need to `pip install pipecat-ai[silero]`.")
     raise Exception(f"Missing module(s): {e}")
 
+# How often should we reset internal model state
+_MODEL_RESET_STATES_TIME = 5.0
+
 
 class SileroVADAnalyzer(VADAnalyzer):
 
-    def __init__(self, sample_rate=16000, params: VADParams = VADParams()):
+    def __init__(
+            self,
+            *,
+            sample_rate: int = 16000,
+            version: str = "v5.0",
+            force_reload: bool = False,
+            skip_validation: bool = True,
+            trust_repo: bool = True,
+            params: VADParams = VADParams()):
         super().__init__(sample_rate=sample_rate, num_channels=1, params=params)
+
+        if sample_rate != 16000 and sample_rate != 8000:
+            raise ValueError("Silero VAD sample rate needs to be 16000 or 8000")
 
         logger.debug("Loading Silero VAD model...")
 
-        (self._model, self._utils) = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad", model="silero_vad", force_reload=False
-        )
+        (self._model, _) = torch.hub.load(repo_or_dir=f"snakers4/silero-vad:{version}",
+                                          model="silero_vad",
+                                          force_reload=force_reload,
+                                          skip_validation=skip_validation,
+                                          trust_repo=trust_repo)
+
+        self._last_reset_time = 0
 
         logger.debug("Loaded Silero VAD")
 
@@ -44,7 +64,7 @@ class SileroVADAnalyzer(VADAnalyzer):
     #
 
     def num_frames_required(self) -> int:
-        return int(self.sample_rate / 100) * 4  # 40ms
+        return 512 if self.sample_rate == 16000 else 256
 
     def voice_confidence(self, buffer) -> float:
         try:
@@ -52,10 +72,19 @@ class SileroVADAnalyzer(VADAnalyzer):
             # Divide by 32768 because we have signed 16-bit data.
             audio_float32 = np.frombuffer(audio_int16, dtype=np.int16).astype(np.float32) / 32768.0
             new_confidence = self._model(torch.from_numpy(audio_float32), self.sample_rate).item()
+
+            # We need to reset the model from time to time because it doesn't
+            # really need all the data and memory will keep growing otherwise.
+            curr_time = time.time()
+            diff_time = curr_time - self._last_reset_time
+            if diff_time >= _MODEL_RESET_STATES_TIME:
+                self._model.reset_states()
+                self._last_reset_time = curr_time
+
             return new_confidence
-        except BaseException as e:
+        except Exception as e:
             # This comes from an empty audio array
-            logger.error(f"Error analyzing audio with Silero VAD: {e}")
+            logger.exception(f"Error analyzing audio with Silero VAD: {e}")
             return 0
 
 
@@ -63,12 +92,23 @@ class SileroVAD(FrameProcessor):
 
     def __init__(
             self,
+            *,
             sample_rate: int = 16000,
+            version: str = "v5.0",
+            force_reload: bool = False,
+            skip_validation: bool = True,
+            trust_repo: bool = True,
             vad_params: VADParams = VADParams(),
             audio_passthrough: bool = False):
         super().__init__()
 
-        self._vad_analyzer = SileroVADAnalyzer(sample_rate=sample_rate, params=vad_params)
+        self._vad_analyzer = SileroVADAnalyzer(
+            sample_rate=sample_rate,
+            version=version,
+            force_reload=force_reload,
+            skip_validation=skip_validation,
+            trust_repo=trust_repo,
+            params=vad_params)
         self._audio_passthrough = audio_passthrough
 
         self._processor_vad_state: VADState = VADState.QUIET
@@ -78,6 +118,8 @@ class SileroVAD(FrameProcessor):
     #
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, AudioRawFrame):
             await self._analyze_audio(frame)
             if self._audio_passthrough:

@@ -14,9 +14,9 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
-    LLMResponseEndFrame,
-    LLMResponseStartFrame,
+    LLMMessagesAppendFrame,
     LLMMessagesFrame,
+    LLMMessagesUpdateFrame,
     StartInterruptionFrame,
     TranscriptionFrame,
     TextFrame,
@@ -71,6 +71,8 @@ class LLMResponseAggregator(FrameProcessor):
     #    S I T E -> X
     #    S I E T -> X
     #  S I E I T -> X
+    #      S E T -> X
+    #    S E I T -> X
     #
     # The following case would not be supported:
     #
@@ -79,6 +81,8 @@ class LLMResponseAggregator(FrameProcessor):
     # and T2 would be dropped.
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         send_aggregation = False
 
         if isinstance(frame, self._start_frame):
@@ -87,6 +91,7 @@ class LLMResponseAggregator(FrameProcessor):
             self._seen_start_frame = True
             self._seen_end_frame = False
             self._seen_interim_results = False
+            await self.push_frame(frame, direction)
         elif isinstance(frame, self._end_frame):
             self._seen_end_frame = True
             self._seen_start_frame = False
@@ -94,11 +99,12 @@ class LLMResponseAggregator(FrameProcessor):
             # We might have received the end frame but we might still be
             # aggregating (i.e. we have seen interim results but not the final
             # text).
-            self._aggregating = self._seen_interim_results
+            self._aggregating = self._seen_interim_results or len(self._aggregation) == 0
 
             # Send the aggregation if we are not aggregating anymore (i.e. no
             # more interim results received).
             send_aggregation = not self._aggregating
+            await self.push_frame(frame, direction)
         elif isinstance(frame, self._accumulator_frame):
             if self._aggregating:
                 self._aggregation += f" {frame.text}"
@@ -116,6 +122,19 @@ class LLMResponseAggregator(FrameProcessor):
             # Reset anyways
             self._reset()
             await self.push_frame(frame, direction)
+        elif isinstance(frame, LLMMessagesAppendFrame):
+            self._messages.extend(frame.messages)
+            messages_frame = LLMMessagesFrame(self._messages)
+            await self.push_frame(messages_frame)
+        elif isinstance(frame, LLMMessagesUpdateFrame):
+            # We push the frame downstream so the assistant aggregator gets
+            # updated as well.
+            await self.push_frame(frame)
+            # We can now reset this one.
+            self._reset()
+            self._messages = frame.messages
+            messages_frame = LLMMessagesFrame(self._messages)
+            await self.push_frame(messages_frame)
         else:
             await self.push_frame(frame, direction)
 
@@ -167,7 +186,7 @@ class LLMUserResponseAggregator(LLMResponseAggregator):
 
 class LLMFullResponseAggregator(FrameProcessor):
     """This class aggregates Text frames until it receives a
-    LLMResponseEndFrame, then emits the concatenated text as
+    LLMFullResponseEndFrame, then emits the concatenated text as
     a single text frame.
 
     given the following frames:
@@ -176,12 +195,12 @@ class LLMFullResponseAggregator(FrameProcessor):
         TextFrame(" world.")
         TextFrame(" I am")
         TextFrame(" an LLM.")
-        LLMResponseEndFrame()]
+        LLMFullResponseEndFrame()]
 
     this processor will yield nothing for the first 4 frames, then
 
         TextFrame("Hello, world. I am an LLM.")
-        LLMResponseEndFrame()
+        LLMFullResponseEndFrame()
 
     when passed the last frame.
 
@@ -197,9 +216,9 @@ class LLMFullResponseAggregator(FrameProcessor):
     >>> asyncio.run(print_frames(aggregator, TextFrame(" world.")))
     >>> asyncio.run(print_frames(aggregator, TextFrame(" I am")))
     >>> asyncio.run(print_frames(aggregator, TextFrame(" an LLM.")))
-    >>> asyncio.run(print_frames(aggregator, LLMResponseEndFrame()))
+    >>> asyncio.run(print_frames(aggregator, LLMFullResponseEndFrame()))
     Hello, world. I am an LLM.
-    LLMResponseEndFrame
+    LLMFullResponseEndFrame
     """
 
     def __init__(self):
@@ -207,6 +226,8 @@ class LLMFullResponseAggregator(FrameProcessor):
         self._aggregation = ""
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, TextFrame):
             self._aggregation += frame.text
         elif isinstance(frame, LLMFullResponseEndFrame):
@@ -226,6 +247,11 @@ class LLMContextAggregator(LLMResponseAggregator):
     async def _push_aggregation(self):
         if len(self._aggregation) > 0:
             self._context.add_message({"role": self._role, "content": self._aggregation})
+
+            # Reset the aggregation. Reset it before pushing it down, otherwise
+            # if the tasks gets cancelled we won't be able to clear things up.
+            self._aggregation = ""
+
             frame = OpenAILLMContextFrame(self._context)
             await self.push_frame(frame)
 
@@ -239,9 +265,10 @@ class LLMAssistantContextAggregator(LLMContextAggregator):
             messages=[],
             context=context,
             role="assistant",
-            start_frame=LLMResponseStartFrame,
-            end_frame=LLMResponseEndFrame,
-            accumulator_frame=TextFrame
+            start_frame=LLMFullResponseStartFrame,
+            end_frame=LLMFullResponseEndFrame,
+            accumulator_frame=TextFrame,
+            handle_interruptions=True
         )
 
 

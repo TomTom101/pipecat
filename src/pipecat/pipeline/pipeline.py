@@ -4,11 +4,10 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-import asyncio
-
 from typing import Callable, Coroutine, List
 
 from pipecat.frames.frames import Frame
+from pipecat.pipeline.base_pipeline import BasePipeline
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 
@@ -19,6 +18,8 @@ class PipelineSource(FrameProcessor):
         self._upstream_push_frame = upstream_push_frame
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         match direction:
             case FrameDirection.UPSTREAM:
                 await self._upstream_push_frame(frame, direction)
@@ -33,6 +34,8 @@ class PipelineSink(FrameProcessor):
         self._downstream_push_frame = downstream_push_frame
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         match direction:
             case FrameDirection.UPSTREAM:
                 await self.push_frame(frame, direction)
@@ -40,7 +43,7 @@ class PipelineSink(FrameProcessor):
                 await self._downstream_push_frame(frame, direction)
 
 
-class Pipeline(FrameProcessor):
+class Pipeline(BasePipeline):
 
     def __init__(self, processors: List[FrameProcessor]):
         super().__init__()
@@ -54,6 +57,19 @@ class Pipeline(FrameProcessor):
         self._link_processors()
 
     #
+    # BasePipeline
+    #
+
+    def processors_with_metrics(self):
+        services = []
+        for p in self._processors:
+            if isinstance(p, BasePipeline):
+                services.extend(p.processors_with_metrics())
+            elif p.can_generate_metrics():
+                services.append(p)
+        return services
+
+    #
     # Frame processor
     #
 
@@ -61,6 +77,8 @@ class Pipeline(FrameProcessor):
         await self._cleanup_processors()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if direction == FrameDirection.DOWNSTREAM:
             await self._source.process_frame(frame, FrameDirection.DOWNSTREAM)
         elif direction == FrameDirection.UPSTREAM:
@@ -73,5 +91,7 @@ class Pipeline(FrameProcessor):
     def _link_processors(self):
         prev = self._processors[0]
         for curr in self._processors[1:]:
+            prev.set_parent(self)
             prev.link(curr)
             prev = curr
+        prev.set_parent(self)

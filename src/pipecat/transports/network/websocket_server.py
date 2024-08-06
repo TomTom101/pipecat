@@ -4,17 +4,14 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-
 import asyncio
 import io
-import queue
 import wave
-import websockets
 
 from typing import Awaitable, Callable
 from pydantic.main import BaseModel
 
-from pipecat.frames.frames import AudioRawFrame, StartFrame
+from pipecat.frames.frames import AudioRawFrame, CancelFrame, EndFrame, StartFrame
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.serializers.base_serializer import FrameSerializer
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
@@ -23,6 +20,13 @@ from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 from loguru import logger
+
+try:
+    import websockets
+except ModuleNotFoundError as e:
+    logger.error(f"Exception: {e}")
+    logger.error("In order to use websockets, you need to `pip install pipecat-ai[websocket]`.")
+    raise Exception(f"Missing module: {e}")
 
 
 class WebsocketServerParams(TransportParams):
@@ -43,8 +47,9 @@ class WebsocketServerInputTransport(BaseInputTransport):
             host: str,
             port: int,
             params: WebsocketServerParams,
-            callbacks: WebsocketServerCallbacks):
-        super().__init__(params)
+            callbacks: WebsocketServerCallbacks,
+            **kwargs):
+        super().__init__(params, **kwargs)
 
         self._host = host
         self._port = port
@@ -53,23 +58,21 @@ class WebsocketServerInputTransport(BaseInputTransport):
 
         self._websocket: websockets.WebSocketServerProtocol | None = None
 
-        self._client_audio_queue = queue.Queue()
         self._stop_server_event = asyncio.Event()
 
     async def start(self, frame: StartFrame):
         self._server_task = self.get_event_loop().create_task(self._server_task_handler())
         await super().start(frame)
 
-    async def stop(self):
+    async def stop(self, frame: EndFrame):
+        await super().stop(frame)
         self._stop_server_event.set()
         await self._server_task
-        await super().stop()
 
-    def read_next_audio_frame(self) -> AudioRawFrame | None:
-        try:
-            return self._client_audio_queue.get(timeout=1)
-        except queue.Empty:
-            return None
+    async def cancel(self, frame: CancelFrame):
+        await super().cancel(frame)
+        self._stop_server_event.set()
+        await self._server_task
 
     async def _server_task_handler(self):
         logger.info(f"Starting websocket server on {self._host}:{self._port}")
@@ -90,8 +93,12 @@ class WebsocketServerInputTransport(BaseInputTransport):
         # Handle incoming messages
         async for message in websocket:
             frame = self._params.serializer.deserialize(message)
-            if isinstance(frame, AudioRawFrame) and self._params.audio_in_enabled:
-                self._client_audio_queue.put_nowait(frame)
+
+            if not frame:
+                continue
+
+            if isinstance(frame, AudioRawFrame):
+                await self.push_audio_frame(frame)
             else:
                 await self._internal_push_frame(frame)
 
@@ -106,8 +113,8 @@ class WebsocketServerInputTransport(BaseInputTransport):
 
 class WebsocketServerOutputTransport(BaseOutputTransport):
 
-    def __init__(self, params: WebsocketServerParams):
-        super().__init__(params)
+    def __init__(self, params: WebsocketServerParams, **kwargs):
+        super().__init__(params, **kwargs)
 
         self._params = params
 
@@ -121,7 +128,10 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
             logger.warning("Only one client allowed, using new connection")
         self._websocket = websocket
 
-    def write_raw_audio_frames(self, frames: bytes):
+    async def write_raw_audio_frames(self, frames: bytes):
+        if not self._websocket:
+            return
+
         self._audio_buffer += frames
         while len(self._audio_buffer) >= self._params.audio_frame_size:
             frame = AudioRawFrame(
@@ -146,10 +156,8 @@ class WebsocketServerOutputTransport(BaseOutputTransport):
                 frame = wav_frame
 
             proto = self._params.serializer.serialize(frame)
-
-            future = asyncio.run_coroutine_threadsafe(
-                self._websocket.send(proto), self.get_event_loop())
-            future.result()
+            if proto:
+                await self._websocket.send(proto)
 
             self._audio_buffer = self._audio_buffer[self._params.audio_frame_size:]
 
@@ -161,8 +169,10 @@ class WebsocketServerTransport(BaseTransport):
             host: str = "localhost",
             port: int = 8765,
             params: WebsocketServerParams = WebsocketServerParams(),
+            input_name: str | None = None,
+            output_name: str | None = None,
             loop: asyncio.AbstractEventLoop | None = None):
-        super().__init__(loop)
+        super().__init__(input_name=input_name, output_name=output_name, loop=loop)
         self._host = host
         self._port = port
         self._params = params
@@ -183,12 +193,12 @@ class WebsocketServerTransport(BaseTransport):
     def input(self) -> FrameProcessor:
         if not self._input:
             self._input = WebsocketServerInputTransport(
-                self._host, self._port, self._params, self._callbacks)
+                self._host, self._port, self._params, self._callbacks, name=self._input_name)
         return self._input
 
     def output(self) -> FrameProcessor:
         if not self._output:
-            self._output = WebsocketServerOutputTransport(self._params)
+            self._output = WebsocketServerOutputTransport(self._params, name=self._output_name)
         return self._output
 
     async def _on_client_connected(self, websocket):
